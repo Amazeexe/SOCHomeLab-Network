@@ -30,7 +30,7 @@ ISP / ONT (Public IP)
 | gi3  | 10   | 192.168.10.0/24 | Main workstation (untagged) |
 | gi1  | 20   | 192.168.20.0/24 | WiFi — ISP router bridged mode |
 | gi5  | 30   | 192.168.30.0/24 | Wired desktops |
-| gi2  | 40   | 192.168.40.0/24 | ELK stack VM (tagged via Proxmox) |
+| gi6  | 40   | 192.168.40.0/24 | ELK stack VM (tagged via Proxmox) |
 | gi6  | 99   | 192.168.99.0/24 | Management (Proxmox, switch) |
 
 ---
