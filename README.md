@@ -165,7 +165,7 @@ interface vlan 1
  shutdown
 
 ! Authentication
-username zmh1020 privilege 15 secret <password>
+username ******* privilege 15 secret <password>
 line vty 0 15
  login local
  transport input ssh
