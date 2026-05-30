@@ -1,6 +1,6 @@
 # Homelab Security Operations Environment
 
-A production-style security monitoring environment built on consumer hardware, designed to simulate enterprise blue team infrastructure. The project covers network segmentation, intrusion detection, log aggregation, and threat visibility using open-source tooling.
+A production-style security monitoring environment built on consumer hardware, designed to simulate enterprise blue team infrastructure. The project covers network segmentation, intrusion detection, log aggregation, vulnerability management, and threat visibility using open-source tooling.
 
 ---
 
@@ -41,7 +41,8 @@ ISP / ONT (Public IP)
 | Device | Role | OS |
 |--------|------|----|
 | Dell Optiplex SFF | Router / Firewall / IDS | OPNsense (bare metal) |
-| Dell Optiplex Micro | Hypervisor | Proxmox VE |
+| Dell Optiplex Micro | Hypervisor (Node 1) | Proxmox VE |
+| Machinist X99 (Xeon E5-2690v4, 32GB ECC) | Hypervisor (Node 2 — AD/Windows lab) | Proxmox VE |
 | Cisco Catalyst 3560CX | Managed switch | IOS 15.2(7)E14 |
 | ISP Router | WiFi AP (bridged mode) | — |
 
@@ -52,8 +53,8 @@ ISP / ONT (Public IP)
 ### OPNsense
 - Stateful firewall with per-VLAN rule sets
 - Inter-VLAN traffic denied by default; explicitly permitted where required
-- WireGuard VPN for remote access
-- DNS resolver with local overrides
+- WireGuard VPN for remote access (split-tunnel routing to all internal VLANs)
+- Unbound DNS resolver with local overrides and query logging enabled
 
 ### Suricata IDS
 - Monitoring on LAN interface and VLAN interfaces
@@ -81,21 +82,58 @@ ISP / ONT (Public IP)
 ## SIEM — ELK Stack (Ubuntu Server VM · VLAN40)
 
 ### Stack
-- **Elasticsearch** — log storage and indexing
-- **Logstash** — ingestion, parsing, enrichment pipeline
+- **Elasticsearch** — log storage and indexing (TLS 1.3 only)
+- **Logstash** — ingestion, parsing, enrichment pipeline (TLS 1.3 only on beats input)
 - **Kibana** — dashboards and alert visualization
 
+### Log Sources (Filebeat filestream → Logstash → Elasticsearch)
+- **Suricata** EVE JSON — IDS alerts and flow events
+- **Firewall** — OPNsense filterlog (dissect-parsed)
+- **DNS** — Unbound resolver query logs (client IP, query name, record type)
+- **DHCP** — Dnsmasq lease events (MAC, assigned IP, hostname, VLAN)
+- **Authentication** — OPNsense web UI access logs (nginx)
+- **Linux auth** — Ubuntu host SSH/auth events via Elastic Agent
+
 ### Logstash Pipeline
-- Ingests Suricata EVE JSON logs from OPNsense
+- Tag-based routing — each log source routed to its own index by Filebeat tags
 - GeoIP enrichment on source/destination IPs
-- Severity normalization across alert categories
-- Separate index routing by log type (alerts, DNS, flows, HTTP)
+- Severity normalization across Suricata alert categories
+- Grok parsing for DNS, DHCP, and auth log formats
+- All custom indices governed by a 30-day ILM policy for storage management
+
+### Index Lifecycle Management
+- `suricata-alerts-*`, `suricata-logs-*`, `firewall-logs-*`
+- `dns-logs-*`, `dhcp-logs-*`, `opnsense-auth-*`
+- All on a 30-day delete policy to bound storage growth on the single-node cluster
 
 ### Kibana Dashboards
 - Suricata alert volume over time
 - Top talkers by source IP and destination country (GeoIP map)
 - Alert severity breakdown
 - Firewall traffic analysis — allowed vs blocked by VLAN
+- DNS query analytics (replaces Pi-hole native UI)
+
+---
+
+## Vulnerability Management — Greenbone / OpenVAS
+
+A dedicated Greenbone Community Edition (OpenVAS) instance runs in Docker on a separate VM (VLAN40), providing authenticated and unauthenticated vulnerability scanning across all network segments.
+
+### Deployment
+- Greenbone Community Edition via official Docker Compose containers
+- Default `admin` account locked out; dedicated admin user provisioned via `gvmd` CLI
+- Scan targets defined per-VLAN across the full address space
+
+### Workflow demonstrated
+- Full and Fast authenticated scan across all five VLAN ranges
+- Findings triaged by CVSS severity
+- Remediation performed and verified by rescan (full vulnerability management loop)
+
+### Example remediation — ELK stack TLS
+- **Finding:** SSL/TLS Renegotiation DoS (CVE-2011-1473) on Elasticsearch (9200) and Logstash (5044); deprecated TLS 1.0/1.1 detected
+- **Action:** Restricted both services to TLS 1.3 only via `supported_protocols` configuration
+- **Verification:** Confirmed via `nmap --script ssl-enum-ciphers` that only TLS 1.3 is negotiated; renegotiation vector eliminated by protocol design
+- **Outcome:** Findings cleared on rescan with no loss of pipeline functionality
 
 ---
 
@@ -108,6 +146,8 @@ ISP / ONT (Public IP)
 | Nmap scan against OPNsense own IPs | ❌ | Known gap — host-based IDS blind spot |
 | Inter-VLAN lateral movement attempts | ✅ | Firewall logs + Suricata |
 | GeoIP — traffic to/from anomalous countries | ✅ | Logstash GeoIP + Kibana |
+| DNS-based exfiltration / tunneling indicators | 🔧 | DNS query logs (detection rules in progress) |
+| New / unknown device on network | 🔧 | DHCP lease logs (detection rules in progress) |
 
 ---
 
@@ -119,6 +159,8 @@ ISP / ONT (Public IP)
 | Discovery | T1018 — Remote System Discovery | Suricata + firewall logs |
 | Lateral Movement | T1021 — Remote Services | Inter-VLAN firewall rules |
 | Command & Control | T1572 — Protocol Tunneling | WireGuard monitoring |
+| Command & Control | T1071.004 — DNS | DNS query logging (rule in progress) |
+| Initial Access | T1200 — Hardware Additions | DHCP new-device monitoring (rule in progress) |
 
 ---
 
@@ -179,10 +221,15 @@ boot system flash:c3560cx-universalk9-mz.152-7.E14.bin
 
 ## Planned Improvements
 
+- [ ] Windows Server 2022 Domain Controller (Proxmox Node 2) with joined endpoints
+- [ ] Sysmon deployment via GPO across domain endpoints, shipped to ELK
+- [ ] Kali Linux attack VM for purple-team telemetry generation
+- [ ] Detection rules in Kibana — Sigma-authored, KQL/EQL-converted, MITRE-tagged
+- [ ] Documented end-to-end alert investigation writeups
+- [ ] Two-node Proxmox cluster with QDevice quorum on OPNsense
 - [ ] SPAN port configuration on Cisco 3560CX
 - [ ] Dedicated IDS sensor NIC on Proxmox host (Intel I350/I210)
 - [ ] Suricata instance on SPAN interface to close OPNsense blind spot
-- [ ] Additional VLAN for IoT device isolation
 - [ ] VLAN-capable AP (TP-Link Omada or Ubiquiti UniFi) for per-SSID VLAN tagging
 - [ ] Zeek for protocol-level network visibility alongside Suricata
 - [ ] Elastic Certified Analyst certification path
@@ -200,4 +247,4 @@ boot system flash:c3560cx-universalk9-mz.152-7.E14.bin
 
 ## Tools & Technologies
 
-`OPNsense` `Suricata` `WireGuard` `Proxmox` `Elasticsearch` `Logstash` `Kibana` `Cisco IOS` `VLAN` `Active Directory` `Entra ID` `PowerShell` `Linux` `MITRE ATT&CK`
+`OPNsense` `Suricata` `WireGuard` `Proxmox` `Elasticsearch` `Logstash` `Kibana` `Greenbone/OpenVAS` `Docker` `Cisco IOS` `VLAN` `Active Directory` `Entra ID` `PowerShell` `Linux` `MITRE ATT&CK`
